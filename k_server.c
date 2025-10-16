@@ -6,8 +6,10 @@
 #include <string.h>
 #include <unistd.h>
 #include <stdbool.h>
+#include <pthread.h>
 
 #define MAX_TOKENS 3
+#define MAX_THREADS 10
 
 //declaring variables
 
@@ -15,10 +17,14 @@ int sockfd, newsockfd, portno;
 socklen_t clilen;
 struct sockaddr_in serv_addr, cli_addr;
 int n1, n2;
-int packet_1st = 0;
 char *tokens[MAX_TOKENS];
 char buffer[256];
 int count,found;
+pthread_t threads[MAX_THREADS];
+int threads_counter = 0;
+int active_connection = 0;
+
+// linked list for storing data
 
 struct node{
     char *data;
@@ -26,20 +32,28 @@ struct node{
     struct node *next;
 };
 
-// linked list for storing data
-
 struct node *head = NULL;
+
+// queue for worker thread pool
+
+pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
+pthread_cond_t cond = PTHREAD_COND_INITIALIZER;
+int front = 0, rear = 0, elements_count = 0;
+int queue[MAX_THREADS];
+void enqueue(int* queue, int socket);
+int dequeue(int* queue);
+
 
 // declaring functions
 
 void error(char *msg);
 bool search(struct node *head, int val);
 struct node *find_node(int val, int *found);
-void create(int key, int value_size);
-void update(int key, int value_size);
-void reads(int key);
-void delete(int key);
-// disconnect function is yet to be implemented
+void create(int key, int value_size, int newsockfd);
+void update(int key, int value_size, int newsockfd);
+void reads(int key, int newsockfd);
+void delete(int key, int newsockfd);
+void *thread_func(void *newsockfd);
 
 // main function
 
@@ -70,27 +84,62 @@ int main(int argc, char* argv[]){
 
     // listen for new connections
 
-    if(listen(sockfd,1) < 0)error("ERROR listening");
+    if(listen(sockfd,MAX_THREADS) < 0)error("ERROR listening");
     clilen = sizeof(cli_addr); 
+
+    // spawn new threads
+
+    for(int inc = 0 ; inc < MAX_THREADS ; inc++){
+        pthread_create(&threads[inc], NULL, thread_func, NULL);
+    }
 
     // handling new connections
 
     while(1){
+
         newsockfd = accept(sockfd, (struct sockaddr *) &cli_addr, &clilen);
         if (newsockfd < 0) 
              error("ERROR on accept");
 
+        printf("New client connection has been requested\n");
+        enqueue(queue, newsockfd);
 
-        while(1 /*connection established per handle */ ){
-            
+        /*
+        newsockfd[threads_counter] = accept(sockfd, (struct sockaddr *) &cli_addr, &clilen);
+        if (newsockfd[threads_counter] < 0) 
+             error("ERROR on accept");
+
+        pthread_create(&threads[threads_counter],NULL, thread_func, &newsockfd[threads_counter]);
+        pthread_detach(threads[threads_counter]);
+        active_connection++;
+        threads_counter = (threads_counter + 1)%MAX_THREADS;*/
+    }
+}
+
+// other functions
+
+void *thread_func(void *param){
+
+    while(1){
+        int newsockfd = dequeue(queue);
+
+            printf("New connection has been accepted from a client\n");
+
+            while(1){
+           
             // read meta data packet from the server
-
             n1 = read(newsockfd,buffer,255);
-                if (n1 < 0) error("ERROR reading from socket");
-                // packet_1st = 1;
-
+                if(n1 == 0){
+                    printf("The client has disconnected\n");
+                    close(newsockfd);
+                    break;
+                }
+                else if(n1 < 0){
+                    close(newsockfd);
+                    error("ERROR reading from socket");
+                } 
+          
             // tokenize the meta-data
-
             count = 0;
             char *token = strtok(buffer," ");
             while(token != NULL && count < MAX_TOKENS){
@@ -98,24 +147,22 @@ int main(int argc, char* argv[]){
                 // printf("%s\n",token);
                 token = strtok(NULL," ");
             }
-
             // CRUD operation handler
-
             if(strcmp("create",tokens[0]) == 0){
-                create(atoi(tokens[1]),atoi(tokens[2]));
                 printf("create function for key %s executed\n",tokens[1]);
+                create(atoi(tokens[1]),atoi(tokens[2]), newsockfd);
             }
             else if(strcmp("update",tokens[0]) == 0){
-                update(atoi(tokens[1]),atoi(tokens[2]));
                 printf("update function for key %s executed\n",tokens[1]);
+                update(atoi(tokens[1]),atoi(tokens[2]), newsockfd);
             }
             else if(strcmp("read",tokens[0]) == 0){
-                reads(atoi(tokens[1]));
                 printf("read function for key %s executed\n",tokens[1]);
+                reads(atoi(tokens[1]), newsockfd);
             }
             else if(strcmp("delete",tokens[0]) == 0){
-                delete(atoi(tokens[1]));
                 printf("delete function for key %s executed\n",tokens[1]);
+                delete(atoi(tokens[1]), newsockfd);
             }
             else if(strcmp("disconnect",tokens[0]) == 0){
                 if(close(newsockfd) == 0){
@@ -124,10 +171,101 @@ int main(int argc, char* argv[]){
                 }
             }
         }
-    }
+    }   
+    return 0;
+
+
+    // printf("Connection accepted for a new client\n");
+
+    // while(1 /*connection established per handle */ ){
+       
+    //     int newsockfd = *(int *)socket;
+
+    //     // read meta data packet from the server
+    //     n1 = read(newsockfd,buffer,255);
+    //         if(n1 == 0){
+    //             printf("The client has disconnected\n");
+    //             close(newsockfd);
+    //             break;
+    //         }
+    //         else if(n1 < 0){
+    //             close(newsockfd);
+    //             error("ERROR reading from socket");
+    //         } 
+        
+    //     // tokenize the meta-data
+    //     count = 0;
+    //     char *token = strtok(buffer," ");
+    //     while(token != NULL && count < MAX_TOKENS){
+    //         tokens[count++] = token;
+    //         // printf("%s\n",token);
+    //         token = strtok(NULL," ");
+    //     }
+    //     // CRUD operation handler
+    //     if(strcmp("create",tokens[0]) == 0){
+    //         printf("create function for key %s executed\n",tokens[1]);
+    //         create(atoi(tokens[1]),atoi(tokens[2]), newsockfd);
+    //     }
+    //     else if(strcmp("update",tokens[0]) == 0){
+    //         printf("update function for key %s executed\n",tokens[1]);
+    //         update(atoi(tokens[1]),atoi(tokens[2]), newsockfd);
+    //     }
+    //     else if(strcmp("read",tokens[0]) == 0){
+    //         printf("read function for key %s executed\n",tokens[1]);
+    //         reads(atoi(tokens[1]), newsockfd);
+    //     }
+    //     else if(strcmp("delete",tokens[0]) == 0){
+    //         printf("delete function for key %s executed\n",tokens[1]);
+    //         delete(atoi(tokens[1]), newsockfd);
+    //     }
+    //     else if(strcmp("disconnect",tokens[0]) == 0){
+    //         if(close(newsockfd) == 0){
+    //             printf("\nConnection terminated\n");
+    //             break;
+    //         }
+    //     }
+    // }
+    // return 0;
+
+    
 }
 
-// other functions
+void enqueue(int *queue, int socket){
+    pthread_mutex_lock(&lock);
+
+    // here handle the case where if the connections max out the queue (use while loop) hint: make the server sleep for a few amt of time if the connections max out
+
+    while(elements_count == MAX_THREADS){
+        pthread_mutex_unlock(&lock);
+        sleep(5);
+        pthread_mutex_lock(&lock);
+    }
+
+    // socket being added to the queue
+
+    queue[rear] = socket;
+
+    rear = (rear+1)%MAX_THREADS;
+    elements_count++;
+
+    pthread_cond_signal(&cond);
+    pthread_mutex_unlock(&lock);
+}
+
+int dequeue(int *queue){
+    pthread_mutex_lock(&lock);
+
+    while(elements_count == 0){
+        pthread_cond_wait(&cond,&lock);
+    }
+
+    int client_sock = queue[front];
+    front = (front+1)%MAX_THREADS;
+    elements_count--;
+
+    pthread_mutex_unlock(&lock);
+    return client_sock;
+}
 
 void error(char *msg)
 {
@@ -160,7 +298,7 @@ struct node *find_node(int val, int *found) {
 }
 
 
-void create(int key, int value_size){
+void create(int key, int value_size,int newsockfd){
     
     // key not found
 
@@ -227,7 +365,7 @@ void create(int key, int value_size){
 
 }
 
-void update(int key, int value_size){
+void update(int key, int value_size, int newsockfd){
     
     // key found
     found = 0;
@@ -303,7 +441,7 @@ void update(int key, int value_size){
 
 }
 
-void reads(int key){
+void reads(int key, int newsockfd){
 
     // key found
 
@@ -384,7 +522,7 @@ void reads(int key){
     }
 }
 
-void delete(int key){
+void delete(int key, int newsockfd){
     
     // key found
     
